@@ -1,0 +1,243 @@
+---
+title: "PredictionAssignment"
+author: "Ragib Hassan"
+date: "18/06/2020"
+output: 
+  html_document:
+    keep_md: true
+---
+
+<!-- rmarkdown v1 -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+Exercise Manner Prediction Using Data from Accelerometers on the Belt, Forearm, Arm and Dumbbell of Participants
+===========
+
+## Synopsis
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, we will be using data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants to predict the manner in which they did the exercise. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+## Exploratory Data Analysis
+
+We obtained the [Training Data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and the [Testing Data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) from the source[1] in the references section.
+
+First, we load the required libraries for this analysis.
+
+```{r load}
+library(dplyr)
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+### Reading in the data
+
+The data for this assignment is in the form of a comma-separated-value file (.csv). We download the data in raw form.
+
+```{r dload}
+if(!file.exists("./pml-training.csv"))
+{
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                  "./pml-training.csv")     
+}
+
+if(!file.exists("./pml-testing.csv"))
+{
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                  "./pml-testing.csv")
+    
+}
+
+```
+
+
+Now, we read in the training data from the raw csv file. Then we look at the dimension of the training data and the name of the columns to find out the columns of interest.
+
+```{r read}
+trdata <- data.table::fread("./pml-training.csv") %>%
+    as_tibble 
+
+dim(trdata); 
+names(trdata);
+```
+
+As we can see, there are `r dim(trdata)[1]` rows in the dataset with `r dim(trdata)[2]` columns. From those, we conclude that, for this analysis, our outcome column is ***`r last(names(trdata))`***. The first 7 columns are most likely identifying variables for the participants, so we choose to discard those, keeping only the ***`r last(names(trdata))`*** column and the columns containing in their names ***belt, forearm, arm, and dumbbell***. We also ensure that ***`r last(names(trdata))`*** is a factor variable for further analyses.
+
+### Selection of attributes
+
+```{r selectCols}
+trdata <- trdata %>% select(-c(V1:num_window)) %>%
+    mutate(classe = factor(classe))
+
+```
+
+```{r include=FALSE, echo=FALSE}
+gc()
+```
+
+### Cleaning the data
+
+We now calculate the percentage of missing values in the extracted training dataset.
+
+```{r totalmissing}
+mean(is.na(trdata))
+```
+
+The percentage of missing values in the training dataset is `r mean(is.na(trdata))*100`%, which unusually high. So, we examine the percentage of missing values in each column and find out a summary of the distribution.
+
+```{r columnmissing}
+naPercent <- sapply(trdata, function(col) mean(is.na(col)))
+plot(naPercent*100,
+     xlab = "column index",
+     ylab = "%missing values",
+     main = "%missing values vs column index")
+summary(naPercent)
+```
+
+As we can see, the median is ***`r median(naPercent)`***, which suggests that at least half of our columns have more than ***`r median(naPercent)*100`%*** missing values. The figure also suggests that the rest of the columns have near 0% missing values. We take this median value as cutoff value and discard all the columns that have ***more%*** missing values than this percentage.
+
+```{r removeMiss}
+mdnNApt <- median(naPercent)
+selectedCol <- (naPercent <= 1-mdnNApt)
+
+trdata <- trdata %>%
+    select_if(selectedCol)
+```
+
+```{r include=FALSE, echo=FALSE}
+gc()
+```
+
+Let's look at the dimensions of the extracted dataset.
+
+```{r}
+dim(trdata)
+```
+
+So, the number of columns has come down from 160 in the original dataset to `r dim(trdata)[2]`.
+
+## Training Partition
+
+For model prediction, we first partition ***(3:1)*** our whole training dataset into two subsets: training and validation. We will build our model on the training set and evaluate performance on the validation set.
+
+```{r partition}
+set.seed(911)
+inTrain <- createDataPartition(trdata$classe, p = 3/4, list = FALSE)
+training <- trdata[ inTrain,]
+validation <- trdata[-inTrain,]
+```
+
+Before we begin training, let's look at the dimensions of the training and validation sets.
+
+```{r}
+dim(training)
+dim(validation)
+```
+
+
+## Building Prediction Models
+
+For our models, we will use a 3-fold cross-validation to ensure better performance. We will also use parallel processing to speed up training.  
+
+### Model 1: Decision Tree
+ 
+As our outcome variable is categorical, we will first build a simple Decision Tree classifier. We then look its performance on the training set itself.
+
+```{r DT, cache=TRUE}
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+
+set.seed(911)
+modelDT <- train(classe~., data = training, method = "rpart", 
+                 trControl = trainControl(method = "cv", number = 3,
+                                          allowParallel = TRUE))
+
+stopCluster(cluster)
+registerDoSEQ()
+
+print(modelDT)
+
+confDTtr <- confusionMatrix(predict(modelDT, training), training$classe)
+print(confDTtr)
+```
+
+As we can see, the overall accuracy is `r round(confDTtr$overall[1]*100, 2)`% which means the in-sample error is `r round((1-confDTtr$overall[1])*100, 2)`%. It is very high, indicating there is high bias in our model. So, we decide to discard this model and build a better model.
+
+```{r include=FALSE, echo=FALSE}
+gc()
+```
+
+
+### Model 2: Random Forest
+
+Now, we build a Random Forest classifier. As earlier, we use 3-fold cross validation and parallel processing. We then look its performance on the training set itself.
+
+```{r RF, cache=TRUE}
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+
+set.seed(911)
+modelRF <- train(classe~., data = training, method = "rf", verbose = FALSE, 
+             trControl = trainControl(method = "cv", number = 3,
+             allowParallel = TRUE))
+
+stopCluster(cluster)
+registerDoSEQ()
+
+print(modelRF)
+
+confRFtr <- confusionMatrix(predict(modelRF, training), training$classe)
+print(confRFtr)
+```
+
+As we can see, the overall accuracy is `r round(confRFtr$overall[1]*100, 2)`% which means the in-sample error is `r round((1-confRFtr$overall[1])*100, 2)`%. So, there is low bias(actually, no bias) in our model. But, this may be due to overfitting. Let's evaluate this model on the validation set to see how much variance there is.
+
+```{r RFval}
+confRFval <- confusionMatrix(predict(modelRF, newdata=validation), validation$classe)
+print(confRFval)
+```
+
+As we can see, the overall accuracy is `r round(confRFval$overall[1]*100, 2)`% which means the expected out of sample error is `r round((1-confRFval$overall[1])*100, 2)`%. It is very low, indicating there is also low variance in our model. As our RF model is showing both low bias and low variance, we decide on this model to be the final model.
+
+Let's have a visual representation of our model's predictions on the validation set to see which examples it got wrong.
+
+```{r valplot}
+plot(1:dim(validation)[1], 
+     predict(modelRF, newdata=validation), 
+     col = validation$classe,
+     xlab = "Example No.",
+     ylab = "Predicted Class",
+     main = "Validation Set")
+legend("bottomright", legend = c("A=1", "B=2", "C=3", "D=4", "E=5"), 
+       col = c("black", "red", "green", "blue", "cyan"), lw = 2)
+```
+
+
+## Evaluation on the Test Dataset
+
+We now load the testing dataset and perform similar transformations (as we did to our training set) on it first and then apply our RF model to the extracted set.
+
+```{r RFtest}
+
+tsdata <- data.table::fread("./pml-testing.csv") %>%
+    as_tibble %>% select(-c(V1:num_window)) %>%
+    select_if(selectedCol)
+
+dim(tsdata)
+
+testing <- tsdata
+
+predRFtest <- predict(modelRF, newdata=testing)
+print(predRFtest)
+```
+
+
+## References
+
+[1]: Source <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>
+
+
+
