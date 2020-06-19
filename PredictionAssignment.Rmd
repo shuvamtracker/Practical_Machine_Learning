@@ -1,7 +1,7 @@
 ---
 title: "PredictionAssignment"
-author: "Ragib Hassan"
-date: "18/06/2020"
+author: "Shuvam Thakur"
+date: "19/06/2020"
 output: 
   html_document:
     keep_md: true
